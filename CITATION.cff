@@ -1,0 +1,44 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: R
+message: >-
+  Predicting extreme weather events through spatio-temporal
+  Bayesian models
+type: software
+authors:
+  - given-names: Luis Jaime
+    family-names: Vidal Jordi
+    email: luisjvidalj@gmail.ocm
+  - name: University Carlos III of Madrid
+    city: Madrid
+    country: ES
+    location: 'Ronda de Toledo, 1, Centro, Madrid'
+    post-code: '28005'
+    region: Madrid
+    website: 'https://uc3m.es'
+repository-code: >-
+  https://github.com/luisvidalj/Predicting-extreme-weather-events-through-spatio-temporal-Bayesian-models.
+abstract: >-
+  This repository contains the code developeb for my master
+  thesis.
+
+
+  The ERA5 Extreme Climate Index (E3CI) is a measure used to
+  identify and quantify extreme weather events such as heat
+  waves, cold snaps, droughts and intense precipitation.
+  This index is crucial for better understanding climate
+  variability and its impact on various sectors, including
+  agriculture, public health and natural resource
+  management. The ability to accurately predict the E3CI is
+  critical to mitigating the adverse effects of these
+  extreme events, allowing decision-makers to implement
+  effective prevention and response strategies.
+
+
+  It is from the code presented in this repository that the
+  results of the last chapter of the Master's thesis have
+  been extracted.
+version: '1.0'
+date-released: '2024-06-24'
