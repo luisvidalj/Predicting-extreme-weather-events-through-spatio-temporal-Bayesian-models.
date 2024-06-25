@@ -1,0 +1,2040 @@
+---
+title: "Spatio_Temporal_Modelling_2"
+author: "Luis Jaime Vidal Jordi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Warning
+**Run the RMD `Cleaning Pre-Processing` before.**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This RMarkdown contains part of the spatio-temporal modelling code elaborated for the Luis' Master Thesis. To follow the code it is highly advisable to previously read the thesis.
+
+```{r}
+# Some Libraries
+library(INLA)
+library(tidyverse)
+library(magrittr)
+library(xtable)
+library(cowplot)
+library(GGally)
+```
+
+
+## SPATIO-TEMPORAL MODELS. 1990:1999
+
+So far we have seen that the *BYM* model is able to fit one year's data very well. However, this fit is not valid (at least not as good as one would expect) for predicting different years. Then the idea is clear: try to estimate the time dependence.
+
+
+The models we are going to consider assume **separability**. That is, the covariance structure can be decomposed as a spatial and a temporal term.
+
+### MODEL GAUSSIAN LIKELIHOOD
+We start by selecting 10 years: from 1990 to 1999.
+
+#### Selecting data
+```{r}
+years9099 <- 1982:2005
+data90_99 <- NULL
+for(i in years9099){
+  data90_99 <- rbind(data90_99,select_year_diff(year = i))
+}
+```
+
+
+#### Raw Correlations
+
+```{r,message=FALSE}
+numeric_9099 <- data_frame("E3CI" = data90_99$E3CI_diff,
+                           "GDP_diff" = data90_99$GDP_diff,
+                           "CO2_diff" = data90_99$CO2_diff,
+                           "GHG_diff" = data90_99$GHG_diff,
+                           "FA_diff" = data90_99$FA_diff)
+
+cor_9099 <- cor(numeric_9099, use = "complete.obs")
+
+library(ggcorrplot)
+ggcorrplot(cor_9099, 
+           method = "circle", 
+           type = "lower", 
+           lab = TRUE, 
+           lab_size = 3, 
+           colors = c("blue", "white", "red"), 
+           title = "Correlogram")
+
+ggpairs(data = data90_99, columns = c("E3CI_diff", "GDP_diff", "CO2_diff","GHG_diff", "FA_diff"))
+```
+
+#### Grouped Correlations
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+
+# Calculate correlations by group
+correlation_by_group <- data90_99 %>%
+  group_by(color_code) %>%
+  summarise(corrE3CI_GDP = cor(E3CI_diff, GDP_diff),
+            corrGDP_CO2 = cor(GDP_diff, CO2_diff),
+            corrCO2_GHG = cor(GHG_diff, CO2_diff),
+            corrCO2_E3CI = cor(CO2_diff, E3CI_diff))
+
+# Base theme to remove axis labels and grid
+base_theme <- theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank()
+  )
+
+# Plot for E3CI and GDP correlation
+plot1 <- ggplot(data = correlation_by_group) +
+  geom_sf(aes(fill = corrE3CI_GDP)) +
+  scale_fill_gradient2(low = "purple", mid = "white", high = "yellow", midpoint = 0,
+                       name = "Correlation") +
+  labs(title = "E3CI and GDP") +
+  base_theme +
+  theme(legend.position = "left")
+
+# Plot for CO2 and GDP correlation
+plot2 <- ggplot(data = correlation_by_group) +
+  geom_sf(aes(fill = corrGDP_CO2)) +
+  scale_fill_gradient2(low = "purple", mid = "white", high = "yellow", midpoint = 0,
+                       name = "Correlation") +
+  labs(title = "CO2 and GDP") +
+  base_theme +
+  theme(legend.position = "right")
+
+# Plot for CO2 and GHG correlation
+plot3 <- ggplot(data = correlation_by_group) +
+  geom_sf(aes(fill = corrCO2_GHG)) +
+  scale_fill_gradient2(low = "purple", mid = "white", high = "yellow", midpoint = 0,
+                       name = "Correlation") +
+  labs(title = "CO2 and GHG") +
+  base_theme +
+  theme(legend.position = "left")
+
+# Plot for CO2 and E3CI correlation
+plot4 <- ggplot(data = correlation_by_group) +
+  geom_sf(aes(fill = corrCO2_E3CI)) +
+  scale_fill_gradient2(low = "purple", mid = "white", high = "yellow", midpoint = 0,
+                       name = "Correlation") +
+  labs(title = "CO2 and E3CI") +
+  base_theme +
+  theme(legend.position = "right")
+
+# Combine the four plots into one
+combined_plot <- (plot1 + plot2) / (plot3 + plot4)
+
+# Display the combined plot
+print(combined_plot)
+
+```
+
+The map that shows the correlation between E3CI and GDP over time could be an indicator of the difficulty to modelize the index with our covariates.
+
+#### 1. Parametric Trend
+
+$$
+\eta_{it} = \text{fixed effects } + v_i + \nu_i + (\beta + \delta_i)\times t
+$$
+
+```{r}
+# We create indexes to use the f() notation
+data90_99$idarea <- as.numeric(as.factor(data90_99$color_code))
+data90_99$idarea1 <- data90_99$idarea
+data90_99$idtime <- 1 + data90_99$Year - min(data90_99$Year)
+
+# (constr = TRUE) is added in some references but result does not change
+
+formula9090_1 <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idarea1,idtime, model = "iid") + idtime
+```
+
+
+```{r}
+mod90_99 <- inla(formula = formula9090_1, 
+                 family = "gaussian",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+
+
+```
+
+```{r}
+data90_99$fitted <- mod90_99$summary.fitted.values[,"mean"]
+```
+
+
+```{r}
+Fitted90_00 <- ggplot(data90_99) + geom_sf(aes(fill = fitted)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Model 1 E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+
+Real90_00 <- ggplot(data90_99) + geom_sf(aes(fill = E3CI_diff)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Real E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+
+
+
+#### 2. Non-Parametric Dynamic Trend
+
+$$
+\eta_{it} = \text{fixed} + v_i + \nu_i + \gamma_t + \phi_t
+$$
+
+here $\gamma_t$ represents a random walk and $\phi_t$ an (prior exchangeable) Gaussian random effect.
+
+```{r}
+data90_99$idtime1 <- data90_99$idtime
+formula_9090_2 <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") +
+  f(idtime1, model = "iid")
+
+mod90_99_2 <- inla(formula = formula_9090_2, 
+                 family = "gaussian",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+```
+
+```{r}
+data90_99$fitted2 <- mod90_99_2$summary.fitted.values[,"mean"]
+
+Fitted90_00_2 <- ggplot(data90_99) + geom_sf(aes(fill = fitted2)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("rw1 E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+
+#### 3-6. Interaction Time-Space
+
+The models we are going to fit in this sectio are an extension of the above one, but now a interaction between time and space is considered through the term: $\delta_{it}$:
+
+$$
+\eta_{it} = \text{fixed} + v_i + u_i + \gamma_t + \phi_t + \delta_{it}
+$$
+
+Now the point is how to define this interaction. There are several ways to define it. Let us consider 4 types:
+
+- I: Interaction between both unstructured spatial $v_i$ and temporal effects $\phi_t $.
+
+- II: Interaction between unstructured spatial $v_i$ and structured temporal $\gamma_t$.
+
+- III: Interaction between structured spatial $u_i$ and unstructured temporal $\phi_t$.
+
+- IV: Interaction between both structured spatial $u_i$ and temporal $\gamma_t$ effects.
+
+
+**Model I**
+
+Creating the interaction term:
+```{r}
+data90_99$idareatime <- interaction(data90_99$idarea,data90_99$idtime)
+data90_99$idareatime <- as.numeric(data90_99$idareatime)
+```
+
+```{r}
+formula_9090_I <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") + f(idtime1, model = "iid") +
+  f(idareatime, model = "iid")
+```
+
+```{r}
+mod90_99_I <- inla(formula = formula_9090_I, 
+                 family = "gaussian",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE, link = 1))
+
+data90_99$fittedI <- mod90_99_I$summary.fitted.values[,"mean"]
+
+Fitted90_00_I <- ggplot(data90_99) + geom_sf(aes(fill = fittedI)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Interaction E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+
+**Model II**
+
+To specify this model we need to create one more copy for the time and area indexes:
+
+```{r}
+data90_99$idarea_int <- data90_99$idarea
+data90_99$idtime_int <- data90_99$idtime
+```
+
+
+```{r}
+formula_9090_II <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") + f(idtime1, model = "iid") +
+  f(idarea_int, model = "iid",group = idtime_int,
+    control.group = list(model="rw1"))
+```
+
+```{r}
+mod90_99_II <- inla(formula = formula_9090_II, 
+                 family = "gaussian",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+
+data90_99$fittedII <- mod90_99_II$summary.fitted.values[,"mean"]
+
+Fitted90_00_II <- ggplot(data90_99) + geom_sf(aes(fill = fittedII)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Interaction E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+**Model III**
+
+```{r}
+formula_9090_III <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") + 
+  f(idtime1, model = "iid") +
+  f(idtime_int, model = "iid",group = idarea_int,
+    control.group = list(model="besag", graph = g))
+```
+
+```{r}
+mod90_99_III <- inla(formula = formula_9090_III, 
+                 family = "gaussian",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+
+data90_99$fittedIII <- mod90_99_III$summary.fitted.values[,"mean"]
+
+Fitted90_00_III <- ggplot(data90_99) + geom_sf(aes(fill = fittedIII)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Interaction E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+**Model IV**
+
+The most complex interaction, as we are going to assume interaction between the structured effects:
+```{r}
+formula_9090_IV <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") + 
+  f(idtime1, model = "iid") +
+  f(idarea_int, model = "besag", graph = g,
+    group = idtime_int,
+    control.group = list(model="rw1"))
+```
+
+```{r}
+mod90_99_IV <- inla(formula = formula_9090_IV, 
+                 family = "gaussian",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+
+data90_99$fittedIV <- mod90_99_IV$summary.fitted.values[,"mean"]
+
+Fitted90_00_IV <- ggplot(data90_99) + geom_sf(aes(fill = fittedIV)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Interaction E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+
+#### Model Comparison
+For the first three spatio-temporal models we cannot expect good results, as we have seen with the spatial models and correlations that the time-space-covariance relationship is not so simple.
+
+- Basic Spatio-Temporal Models:
+```{r}
+# Real90_00
+# Fitted90_00
+# Fitted90_00_2
+```
+
+
+- More complex spatio-temporal models: interactions
+```{r}
+Real90_00
+Fitted90_00_I
+# Fitted90_00_II
+# Fitted90_00_III
+# Fitted90_00_IV
+```
+
+Combine these plots
+
+```{r}
+# comb_int1_real <- plot_grid(Real90_00,Fitted90_00_I,ncol = 2) %>% print()
+# comb_paramtrend_real <- plot_grid(Real90_00,Fitted90_00,ncol = 2) %>% print()
+# comb_int4_real <- plot_grid(Real90_00,Fitted90_00_IV,ncol = 2) %>% print()
+```
+
+
+
+```{r}
+results9099 <- data.frame("E3CI_real" = data90_99$E3CI_diff,"IID" = mod90_99$summary.fitted.values[,"mean"], "rw1" = mod90_99_2$summary.fitted.values[,"mean"], "Interaction_I" = mod90_99_I$summary.fitted.values[,"mean"],"Interaction_II" = mod90_99_II$summary.fitted.values[,"mean"],"Interaction_III" = mod90_99_III$summary.fitted.values[,"mean"],"Interaction_IV" = mod90_99_IV$summary.fitted.values[,"mean"])
+
+mse <- function(real,fitted){
+  return(mean((real - fitted)^2))
+}
+results_df9099 <- cbind(data90_99, results9099)
+```
+
+Different available criteria for model selection:
+
+- `MSE` (on train partition)
+```{r}
+MSE_90_99 <- c(mse(results_df9099$E3CI_diff, fitted = results9099$E3CI_real),
+               mse(results_df9099$E3CI_diff, fitted = results9099$IID), 
+               mse(results_df9099$E3CI_diff, fitted = results9099$rw1), 
+               mse(results_df9099$E3CI_diff, fitted = results9099$Interaction_I),
+               mse(results_df9099$E3CI_diff, fitted = results9099$Interaction_II),
+               mse(results_df9099$E3CI_diff, fitted = results9099$Interaction_III),
+               mse(results_df9099$E3CI_diff, fitted = results9099$Interaction_IV))
+#MSE_90_99
+```
+
+
+- `cpo` can be computed in the following way:
+```{r}
+cpo <- function(inla_model){
+  return(-sum(log(inla_model$cpo$cpo)))
+}
+
+cpo_iid_time <- cpo(mod90_99)
+cpo_rw1 <- cpo(mod90_99_2)
+cpo_interactionI <- cpo(mod90_99_I)
+cpo_interactionII <- cpo(mod90_99_II)
+cpo_interactionIII <- cpo(mod90_99_III)
+cpo_interactionIV <- cpo(mod90_99_IV)
+
+
+CPOs_9099 <- c(cpo_iid_time,cpo_rw1,cpo_interactionI,cpo_interactionII,
+               cpo_interactionIII,cpo_interactionIV)
+```
+
+- `marginal likelihood`: **Hay dos valores, no se cual es el que pone la teoria**
+```{r}
+MLIKs9099 <- c(mod90_99$mlik[[1,1]],mod90_99_2$mlik[[1,1]],
+               mod90_99_I$mlik[[1,1]],
+               mod90_99_II$mlik[[1,1]],
+               mod90_99_III$mlik[[1,1]],
+               mod90_99_IV$mlik[[1,1]])
+```
+
+- `DIC`
+```{r}
+DICs9099 <- c(mod90_99$dic$dic,mod90_99_2$dic$dic,
+              mod90_99_I$dic$dic,
+              mod90_99_II$dic$dic,
+              mod90_99_III$dic$dic,
+              mod90_99_IV$dic$dic)
+```
+
+- `WAIC` 
+```{r}
+WAICs9099 <- c(mod90_99$waic$waic,mod90_99_2$waic$waic,
+               mod90_99_I$waic$waic,
+               mod90_99_II$waic$waic,
+               mod90_99_III$waic$waic,
+               mod90_99_IV$waic$waic)
+```
+
+
+```{r}
+percentage_diff_sign <- function(vector1, vector2) {
+  # Check that the vectors have the same length
+  if (length(vector1) != length(vector2)) {
+    stop("The vectors must have the same length.")
+  }
+  
+  # Calculate the number of elements with differing signs
+  diff_signs <- sum(sign(vector1) != sign(vector2))
+  
+  # Calculate the percentage
+  percentage <- (diff_signs / length(vector1)) * 100
+  
+  return(percentage)
+}
+signs90_99 <- c(percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fitted),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fitted2),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fittedI),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fittedII),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fittedIII),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fittedIV))
+```
+
+```{r}
+errors_df9099_n <- data.frame("Likelihood" = rep("gaussian",6), 
+                              "Model" = c("bym + IID", "bym + rw1", "Interaction I",
+                                        "Interaction II","Interaction III","Interaction IV"), 
+               "WAIC" = WAICs9099,
+               "MLIK" = MLIKs9099,
+               "CPO" = CPOs_9099,
+               "DIC" = DICs9099,
+               "MSE" = MSE_90_99[2:length(MSE_90_99)],
+               "SignError" = signs90_99)
+
+library(kableExtra)
+kable(errors_df9099_n)
+#xtable::xtable(errors_df9099_n, digits = 3)
+```
+
+#### Predictions
+
+First, we save the current `data90_99` which contains the fitted values of the above models
+```{r}
+data90_99_saved <- data90_99
+```
+
+To predict with INLA we only have to include the observations we want to predict **with a missing value in the response**. 
+
+Then, let us reconsider `data_9099` but now we are going to include the year 2022:
+```{r}
+years9099 <- c(1990:2022)
+data90_99 <- NULL
+for(i in years9099){ 
+  data90_99 <- rbind(data90_99,select_year_diff2(year = i))
+}
+data90_99_bench <- data90_99
+data90_99[which(data90_99$Year %in% c(2005:2022)),"E3CI_diff"] = NA
+```
+
+Now, we refit the best model obtained above: *bym + interaction I*.
+
+```{r}
+# Create indexes as before
+#data90_99$idarea <- as.numeric(as.factor(data90_99$color_code))
+data90_99$idarea1 <- data90_99$idarea
+#data90_99$idtime <- 1 + data90_99$Year - min(data90_99$Year)
+data90_99$idtime1 <- data90_99$idtime
+data90_99$idareatime <- interaction(data90_99$idarea,data90_99$idtime)
+data90_99$idtime_int <- data90_99$idtime
+data90_99$idarea_int <- data90_99$idarea
+
+ prec.prior <- list(prec = list(param = c(0.001, 0.001)))
+
+formula_9090_I <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1", hyper = prec.prior) + f(idtime1, model = "iid",
+                                                   hyper = prec.prior) +
+  f(idareatime, model = "iid")
+
+
+
+# formula_9090_IV <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+#   f(idarea, model = "bym", graph = g) + 
+#   f(idtime, model = "rw1") + 
+#   f(idtime1, model = "iid") +
+#   f(idarea_int, model = "besag", graph = g,
+#     group = idtime_int,
+#     control.group = list(model="rw1"))
+
+# Fit the model
+mod90_99_predI <- inla(formula = formula_9090_I, 
+                 family = "gaussian",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE, link = 1))
+```
+
+Now, Inla has used the predictive distribution to compute the values for the year 2000:
+
+```{r}
+rows2000 <- which(data90_99$Year == 2000)
+rows2000_bench <- which(data90_99_bench$Year == 2000)
+pred_2000 <- mod90_99_predI$summary.fitted.values[rows2000,"mean"]
+
+#preds_mod9099 <- data.frame("Real_2000" = data90_99_bench[rows2000_bench,"E3CI"])
+data90_99_bench$fittedI <- mod90_99_predI$summary.fitted.values[,"mean"]
+data90_99_bench <- data90_99_bench %>%  relocate(fittedI, .after = E3CI)
+```
+
+Then, we can check the MSE error of the predicted values:
+
+```{r}
+# To check whether the order is correct or not 
+unique(rows2000_bench == rows2000)
+unique(data90_99$color_code[rows2000] == data90_99_bench$color_code[rows2000_bench])
+
+
+df_pred90_99 <- data.frame("Real" = data90_99_bench$E3CI_diff[rows2000_bench],
+                      "fittedI" = data90_99_bench$fittedI[rows2000_bench],
+                      "Code1" = data90_99_bench$color_code[rows2000_bench],
+                      "Code2" = data90_99$color_code[rows2000_bench])
+
+#View(df_pred90_99)
+
+MSE_pred2000 <- mse(real = data90_99_bench$E3CI_diff[rows2000_bench],
+                    fitted = data90_99_bench$fittedI[rows2000_bench]) %>% print()
+```
+
+It could be also of interest to check the number of missclassified signs:
+```{r}
+percentage_diff_sign <- function(vector1, vector2) {
+  # Check that the vectors have the same length
+  if (length(vector1) != length(vector2)) {
+    stop("The vectors must have the same length.")
+  }
+  
+  # Calculate the number of elements with differing signs
+  diff_signs <- sum(sign(vector1) != sign(vector2))
+  
+  # Calculate the percentage
+  percentage <- (diff_signs / length(vector1)) * 100
+  
+  return(percentage)
+}
+```
+
+
+```{r}
+map2000_real <- ggplot(data = data90_99_bench[rows2000_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2000") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2000_predI <- ggplot(data = data90_99_bench[rows2000_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2000") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2000_real
+map2000_predI
+Mse_pred2000 <- mse(data90_99_bench$E3CI_diff[rows2000_bench],data90_99_bench$fittedI[rows2000_bench])
+
+signerror2000<- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2000_bench],data90_99_bench$fittedI[rows2000_bench])
+```
+
+```{r}
+rows2001_bench <- which(data90_99_bench$Year == 2001)
+map2001_real <- ggplot(data = data90_99_bench[rows2001_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2001") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2001_predI <- ggplot(data = data90_99_bench[rows2001_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2001") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2001_real
+map2001_predI
+Mse_pred2001 <- mse(data90_99_bench$E3CI_diff[rows2001_bench],data90_99_bench$fittedI[rows2001_bench]) %>% print()
+
+signerror2001 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2001_bench],data90_99_bench$fittedI[rows2001_bench]) %>% print()
+```
+
+
+```{r}
+rows2002_bench <- which(data90_99_bench$Year == 2002)
+map2002_real <- ggplot(data = data90_99_bench[rows2002_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2002") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2002_predI <- ggplot(data = data90_99_bench[rows2002_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2002") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2002_real
+map2002_predI
+
+Mse_pred2002 <- mse(data90_99_bench$E3CI_diff[rows2002_bench],data90_99_bench$fittedI[rows2002_bench])
+
+signerror2002 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2002_bench],data90_99_bench$fittedI[rows2002_bench]) %>% print()
+```
+
+```{r}
+rows2003_bench <- which(data90_99_bench$Year == 2003)
+map2003_real <- ggplot(data = data90_99_bench[rows2003_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2003") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2003_predI <- ggplot(data = data90_99_bench[rows2003_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2003") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2003_real
+map2003_predI
+Mse_pred2003 <- mse(data90_99_bench$E3CI_diff[rows2003_bench],data90_99_bench$fittedI[rows2003_bench])
+signerror2003 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2003_bench],data90_99_bench$fittedI[rows2003_bench]) %>% print()
+```
+
+```{r}
+rows2004_bench <- which(data90_99_bench$Year == 2004)
+map2004_real <- ggplot(data = data90_99_bench[rows2004_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2004") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2004_predI <- ggplot(data = data90_99_bench[rows2004_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2004") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2004_real
+map2004_predI
+
+Mse_pred2004 <- mse(data90_99_bench$E3CI_diff[rows2004_bench],data90_99_bench$fittedI[rows2004_bench])
+
+signerror2004 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2004_bench],data90_99_bench$fittedI[rows2004_bench]) %>% print()
+```
+
+
+```{r}
+rows2005_bench <- which(data90_99_bench$Year == 2005)
+map2005_real <- ggplot(data = data90_99_bench[rows2005_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2005") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2005_predI <- ggplot(data = data90_99_bench[rows2005_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2005") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2005_real
+map2005_predI
+Mse_pred2005 <- mse(data90_99_bench$E3CI_diff[rows2005_bench],data90_99_bench$fittedI[rows2005_bench])
+
+signerror2005 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2005_bench],data90_99_bench$fittedI[rows2005_bench]) %>% print()
+```
+
+All joint:
+
+```{r}
+filtered_data <- data90_99_bench %>%
+  filter(Year %in% c(2001, 2002, 2003, 2004, 2005))
+
+combined_df <- filtered_data %>%
+  dplyr::select(geometry, Year, E3CI_diff, fittedI) %>%
+  pivot_longer(cols = c(E3CI_diff, fittedI), 
+               names_to = "Variable", 
+               values_to = "Value") %>%
+  unite("Year_Variable", Year, Variable, sep = "_")
+
+combined_map <- ggplot(combined_df) +
+  geom_sf(aes(fill = Value)) + 
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") +
+  facet_wrap(~ Year_Variable, ncol = 5) +
+  labs(fill = "Value") +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 12),
+        legend.position = "right") 
+
+print(combined_map)
+```
+
+In a table
+```{r}
+preds_df9099 <- data.frame(Year = 2000:2005,
+                           SignError = c(signerror2000,signerror2001,
+                                          signerror2002,signerror2003,
+                                          signerror2004,signerror2005),
+                           MSE = c(Mse_pred2000,Mse_pred2001,
+                                    Mse_pred2002,Mse_pred2003,
+                                    Mse_pred2004,Mse_pred2005))
+
+# transformed_df <- data.frame(
+#   Metric = c("SignError","SignError","MSE","MSE"),
+#   Model = c("Spatial", "Spatio-Temp","Spatial", "Spatio-Temp"),
+#   `2000` = c(signerror2000_00, signerror2000, MSE_2000_00, Mse_pred2000),
+#   `2001` = c(signerror2001_00, signerror2001, MSE_2001_00, Mse_pred2001),
+#   `2002` = c(signerror2002_00, signerror2002, MSE_2002_00, Mse_pred2002),
+#   `2003` = c(signerror2003_00, signerror2003, MSE_2003_00, Mse_pred2003),
+#   `2004` = c(signerror2004_00, signerror2004, MSE_2004_00, Mse_pred2004),
+#   `2005` = c(signerror2005_00, signerror2005, MSE_2005_00, Mse_pred2005)
+# )
+
+transformed_df <- data.frame(
+  Metric = c("SignError","SignError","MSE","MSE"),
+  Model = c("Spatial", "Spatio-Temp","Spatial", "Spatio-Temp"),
+  `2000` = c(NA, signerror2000, NA, Mse_pred2000),
+  `2001` = c(NA, signerror2001, NA, Mse_pred2001),
+  `2002` = c(NA, signerror2002, NA, Mse_pred2002),
+  `2003` = c(NA, signerror2003, NA, Mse_pred2003),
+  `2004` = c(NA, signerror2004, NA, Mse_pred2004),
+  `2005` = c(NA, signerror2005, NA, Mse_pred2005)
+)
+
+kable(transformed_df)
+#xtable(transformed_df, digits = 3)
+```
+
+##### All the sign errors
+```{r}
+compute_summary <- function(years){
+  sign_errors <- NULL
+  mses <- NULL
+  for(i in years){
+    cond <- which(data90_99_bench$Year == i)
+    sign_errors <- c(sign_errors,
+                     percentage_diff_sign(data90_99_bench$E3CI_diff[cond],
+                                          data90_99_bench$fittedI[cond]))
+    mses <- c(mses, 
+              mse(data90_99_bench$E3CI_diff[cond],
+                  data90_99_bench$fittedI[cond]))
+  }
+  df <- data.frame(Year = years,
+                   SignError = sign_errors,
+                   MSE = mses)
+  return(df)
+}
+```
+
+```{r}
+del82_05_202122 <- compute_summary(years9099)
+kable(compute_summary(years9099))
+
+```
+
+
+De momento los años mas problematicos son 2014, 2018 y 2020.
+
+```{r}
+outliers <- which((data90_99_bench$E3CI_diff >= 4) | (data90_99_bench$E3CI_diff <= -4))
+outliers_GDP <- which((data90_99_bench$GDP_diff >= 4) | (data90_99_bench$GDP_diff <= -4))
+#View(data90_99_bench[outliers,c("name","E3CI_diff","fittedI","Year","GDP_diff","CO2_diff","FA_diff")])
+```
+
+##### 2014, 2020, 2021 and 2022
+
+```{r}
+rows2014_bench_e <- which(data90_99_bench$Year == 2014)
+map2014_real_e <- ggplot(data = data90_99_bench[rows2014_bench_e,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2014") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") + 
+  theme(legend.position = "right",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+map2014_predI_e <- ggplot(data = data90_99_bench[rows2014_bench_e,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2014") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") + 
+  theme(legend.position = "right",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+map2014_real_e
+map2014_predI_e
+Mse_pred2014 <- mse(data90_99_bench$E3CI_diff[rows2014_bench_e],data90_99_bench$fittedI[rows2014_bench_e]) %>% print()
+
+signerror2014 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2014_bench_e],data90_99_bench$fittedI[rows2014_bench_e]) %>% print()
+```
+
+
+
+```{r}
+rows2020_bench_e <- which(data90_99_bench$Year == 2020)
+map2020_real_e <- ggplot(data = data90_99_bench[rows2020_bench_e,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real - 2020") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") + 
+  theme(legend.position = "left",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+map2020_predI_e <- ggplot(data = data90_99_bench[rows2020_bench_e,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Interaction I - 2020") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") + 
+  theme(legend.position = "left",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+map2020_real_e
+map2020_predI_e
+Mse_pred2020 <- mse(data90_99_bench$E3CI_diff[rows2020_bench_e],data90_99_bench$fittedI[rows2020_bench_e]) %>% print()
+
+signerror2020 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2020_bench_e],data90_99_bench$fittedI[rows2020_bench_e]) %>% print()
+```
+
+```{r}
+rows2021_bench_e <- which(data90_99_bench$Year == 2021)
+map2021_real_e <- ggplot(data = data90_99_bench[rows2021_bench_e,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real - 2021") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") + 
+  theme(legend.position = "top",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+map2021_predI_e <- ggplot(data = data90_99_bench[rows2021_bench_e,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Interaction I - 2021") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") + 
+  theme(legend.position = "bottom",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+map2021_real_e
+map2021_predI_e
+Mse_pred2021 <- mse(data90_99_bench$E3CI_diff[rows2021_bench_e],data90_99_bench$fittedI[rows2021_bench_e]) %>% print()
+
+signerror2021 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2021_bench_e],data90_99_bench$fittedI[rows2021_bench_e]) %>% print()
+```
+
+```{r}
+rows2022_bench_e <- which(data90_99_bench$Year == 2022)
+
+map2022_real_e <- ggplot(data = data90_99_bench[rows2022_bench_e,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real - 2022") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") + 
+  theme(legend.position = "right",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+map2022_predI_e <- ggplot(data = data90_99_bench[rows2022_bench_e,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Interaction I - 2022") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") + 
+  theme(legend.position = "right",
+        panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+map2022_real_e
+map2022_predI_e
+Mse_pred2022 <- mse(data90_99_bench$E3CI_diff[rows2022_bench_e],data90_99_bench$fittedI[rows2022_bench_e]) %>% print()
+
+signerror2022 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2022_bench_e],data90_99_bench$fittedI[rows2022_bench_e]) %>% print()
+```
+
+
+
+```{r}
+comb_plot_202122 <- (map2020_real_e +
+                       map2021_real_e +
+                       map2022_real_e)/(map2020_predI_e +
+                                          map2021_predI_e +
+                                          map2022_predI_e)
+
+print(comb_plot_202122)
+```
+
+#### Posterior Information
+
+```{r}
+#summary(mod90_99_predI)
+mod90_99_predI$summary.fixed[,1:6]
+mod90_99_predI$summary.hyperpar
+
+xtable(mod90_99_predI$summary.fixed[,1:6], digits = 4)
+xtable(mod90_99_predI$summary.hyperpar)
+```
+
+
+### MODEL STUDENT LIKELIHOOD
+The same model than above is fitted but setting a t-Student likelihood.
+
+#### Selecting data
+```{r}
+years9099 <- 1990:2005
+data90_99 <- NULL
+for(i in years9099){
+  data90_99 <- rbind(data90_99,select_year_diff2(year = i))
+}
+```
+
+
+#### Raw Correlations
+
+```{r,message=FALSE}
+numeric_9099 <- data_frame("E3CI" = data90_99$E3CI_diff,
+                           "GDP_diff" = data90_99$GDP_diff,
+                           "CO2_diff" = data90_99$CO2_diff,
+                           "GHG_diff" = data90_99$GHG_diff,
+                           "FA_diff" = data90_99$FA_diff)
+
+cor_9099 <- cor(numeric_9099, use = "complete.obs")
+
+library(ggcorrplot)
+ggcorrplot(cor_9099, 
+           method = "circle", 
+           type = "lower", 
+           lab = TRUE, 
+           lab_size = 3, 
+           colors = c("blue", "white", "red"), 
+           title = "Correlogram")
+
+ggpairs(data = data90_99, columns = c("E3CI_diff", "GDP_diff", "CO2_diff","GHG_diff", "FA_diff"))
+```
+
+#### Grouped Correlations
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+
+# Calculate correlations by group
+correlation_by_group <- data90_99 %>%
+  group_by(color_code) %>%
+  summarise(corrE3CI_GDP = cor(E3CI_diff, GDP_diff),
+            corrGDP_CO2 = cor(GDP_diff, CO2_diff),
+            corrCO2_GHG = cor(GHG_diff, CO2_diff),
+            corrCO2_E3CI = cor(CO2_diff, E3CI_diff))
+
+# Base theme to remove axis labels and grid
+base_theme <- theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank()
+  )
+
+# Plot for E3CI and GDP correlation
+plot1 <- ggplot(data = correlation_by_group) +
+  geom_sf(aes(fill = corrE3CI_GDP)) +
+  scale_fill_gradient2(low = "purple", mid = "white", high = "yellow", midpoint = 0,
+                       name = "Correlation") +
+  labs(title = "E3CI and GDP") +
+  base_theme +
+  theme(legend.position = "left")
+
+# Plot for CO2 and GDP correlation
+plot2 <- ggplot(data = correlation_by_group) +
+  geom_sf(aes(fill = corrGDP_CO2)) +
+  scale_fill_gradient2(low = "purple", mid = "white", high = "yellow", midpoint = 0,
+                       name = "Correlation") +
+  labs(title = "CO2 and GDP") +
+  base_theme +
+  theme(legend.position = "right")
+
+# Plot for CO2 and GHG correlation
+plot3 <- ggplot(data = correlation_by_group) +
+  geom_sf(aes(fill = corrCO2_GHG)) +
+  scale_fill_gradient2(low = "purple", mid = "white", high = "yellow", midpoint = 0,
+                       name = "Correlation") +
+  labs(title = "CO2 and GHG") +
+  base_theme +
+  theme(legend.position = "left")
+
+# Plot for CO2 and E3CI correlation
+plot4 <- ggplot(data = correlation_by_group) +
+  geom_sf(aes(fill = corrCO2_E3CI)) +
+  scale_fill_gradient2(low = "purple", mid = "white", high = "yellow", midpoint = 0,
+                       name = "Correlation") +
+  labs(title = "CO2 and E3CI") +
+  base_theme +
+  theme(legend.position = "right")
+
+# Combine the four plots into one
+combined_plot <- (plot1 + plot2) / (plot3 + plot4)
+
+# Display the combined plot
+print(combined_plot)
+
+```
+
+The map that shows the correlation between E3CI and GDP over time could be an indicator of the difficulty to modelize the index with our covariates.
+
+#### 1. Parametric Trend
+
+$$
+\eta_{it} = \text{fixed effects } + v_i + \nu_i + (\beta + \delta_i)\times t
+$$
+
+```{r}
+# We create indexes to use the f() notation
+#data90_99$idarea <- as.numeric(as.factor(data90_99$color_code))
+data90_99$idarea1 <- data90_99$idarea
+#data90_99$idtime <- 1 + data90_99$Year - min(data90_99$Year)
+
+# (constr = TRUE) is added in some references but result does not change
+
+formula9090_1 <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idarea1,idtime, model = "iid") + idtime
+```
+
+
+```{r}
+mod90_99 <- inla(formula = formula9090_1, 
+                 family = "t",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+
+
+```
+
+```{r}
+data90_99$fitted <- mod90_99$summary.fitted.values[,"mean"]
+```
+
+
+```{r}
+Fitted90_00 <- ggplot(data90_99) + geom_sf(aes(fill = fitted)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Model 1 E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+
+Real90_00 <- ggplot(data90_99) + geom_sf(aes(fill = E3CI_diff)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Real E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+
+
+
+#### 2. Non-Parametric Dynamic Trend
+
+$$
+\eta_{it} = \text{fixed} + v_i + \nu_i + \gamma_t + \phi_t
+$$
+
+here $\gamma_t$ represents a random walk and $\phi_t$ an (prior exchangeable) Gaussian random effect.
+
+```{r}
+data90_99$idtime1 <- data90_99$idtime
+formula_9090_2 <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") +
+  f(idtime1, model = "iid")
+
+mod90_99_2 <- inla(formula = formula_9090_2, 
+                 family = "t",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+```
+
+```{r}
+data90_99$fitted2 <- mod90_99_2$summary.fitted.values[,"mean"]
+
+Fitted90_00_2 <- ggplot(data90_99) + geom_sf(aes(fill = fitted2)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("rw1 E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+
+#### 3-6. Interaction Time-Space
+
+The models we are going to fit in this sectio are an extension of the above one, but now a interaction between time and space is considered through the term: $\delta_{it}$:
+
+$$
+\eta_{it} = \text{fixed} + v_i + u_i + \gamma_t + \phi_t + \delta_{it}
+$$
+
+Now the point is how to define this interaction. There are several ways to define it. Let us consider 4 types:
+
+- I: Interaction between both unstructured spatial $v_i$ and temporal effects $\phi_t $.
+
+- II: Interaction between unstructured spatial $v_i$ and structured temporal $\gamma_t$.
+
+- III: Interaction between structured spatial $u_i$ and unstructured temporal $\phi_t$.
+
+- IV: Interaction between both structured spatial $u_i$ and temporal $\gamma_t$ effects.
+
+
+**Model I**
+
+Creating the interaction term:
+```{r}
+data90_99$idareatime <- interaction(data90_99$idarea,data90_99$idtime)
+data90_99$idareatime <- as.numeric(data90_99$idareatime)
+```
+
+```{r}
+formula_9090_I <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") + f(idtime1, model = "iid") +
+  f(idareatime, model = "iid")
+```
+
+```{r}
+mod90_99_I <- inla(formula = formula_9090_I, 
+                 family = "t",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+
+data90_99$fittedI <- mod90_99_I$summary.fitted.values[,"mean"]
+
+Fitted90_00_I <- ggplot(data90_99) + geom_sf(aes(fill = fittedI)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Interaction E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+
+**Model II**
+
+To specify this model we need to create one more copy for the time and area indexes:
+
+```{r}
+data90_99$idarea_int <- data90_99$idarea
+data90_99$idtime_int <- data90_99$idtime
+```
+
+
+```{r}
+formula_9090_II <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") + f(idtime1, model = "iid") +
+  f(idarea_int, model = "iid",group = idtime_int,
+    control.group = list(model="rw1"))
+```
+
+```{r}
+mod90_99_II <- inla(formula = formula_9090_II, 
+                 family = "t",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+
+data90_99$fittedII <- mod90_99_II$summary.fitted.values[,"mean"]
+
+Fitted90_00_II <- ggplot(data90_99) + geom_sf(aes(fill = fittedII)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Interaction E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+**Model III**
+
+```{r}
+formula_9090_III <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") + 
+  f(idtime1, model = "iid") +
+  f(idtime_int, model = "iid",group = idarea_int,
+    control.group = list(model="besag", graph = g))
+```
+
+```{r}
+mod90_99_III <- inla(formula = formula_9090_III, 
+                 family = "t",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+
+data90_99$fittedIII <- mod90_99_III$summary.fitted.values[,"mean"]
+
+Fitted90_00_III <- ggplot(data90_99) + geom_sf(aes(fill = fittedIII)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Interaction E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+**Model IV**
+
+The most complex interaction, as we are going to assume interaction between the structured effects:
+```{r}
+formula_9090_IV <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") + 
+  f(idtime1, model = "iid") +
+  f(idarea_int, model = "besag", graph = g,
+    group = idtime_int,
+    control.group = list(model="rw1"))
+```
+
+```{r}
+mod90_99_IV <- inla(formula = formula_9090_IV, 
+                 family = "t",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+
+data90_99$fittedIV <- mod90_99_IV$summary.fitted.values[,"mean"]
+
+Fitted90_00_IV <- ggplot(data90_99) + geom_sf(aes(fill = fittedIV)) +
+  facet_wrap(~Year, dir = 'h') +
+  ggtitle("Interaction E3CI") + theme_bw() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradient2(
+    midpoint = -0, low = "blue", mid = "white", high = "red"
+  )
+```
+
+
+#### Model Comparison
+For the first three spatio-temporal models we cannot expect good results, as we have seen with the spatial models and correlations that the time-space-covariance relationship is not so simple.
+
+- Basic Spatio-Temporal Models:
+```{r}
+# Real90_00
+Fitted90_00
+# Fitted90_00_2
+```
+
+
+- More complex spatio-temporal models: interactions
+```{r}
+Real90_00
+Fitted90_00_I
+# Fitted90_00_II
+# Fitted90_00_III
+Fitted90_00_IV
+```
+
+Combine these plots
+
+```{r}
+comb_4 <- plot_grid(Real90_00, Fitted90_00_I,ncol = 2) %>% print()
+# comb_paramtrend_real <- plot_grid(Real90_00,Fitted90_00,ncol = 2) %>% print()
+# comb_int4_real <- plot_grid(Real90_00,Fitted90_00_IV,ncol = 2) %>% print()
+```
+
+
+
+```{r}
+results9099 <- data.frame("E3CI_real" = data90_99$E3CI_diff,"IID" = mod90_99$summary.fitted.values[,"mean"], "rw1" = mod90_99_2$summary.fitted.values[,"mean"], "Interaction_I" = mod90_99_I$summary.fitted.values[,"mean"],"Interaction_II" = mod90_99_II$summary.fitted.values[,"mean"],"Interaction_III" = mod90_99_III$summary.fitted.values[,"mean"],"Interaction_IV" = mod90_99_IV$summary.fitted.values[,"mean"])
+
+mse <- function(real,fitted){
+  return(mean((real - fitted)^2))
+}
+results_df9099 <- cbind(data90_99, results9099)
+```
+
+Different available criteria for model selection:
+
+- `MSE` (on train partition)
+```{r}
+MSE_90_99 <- c(mse(results_df9099$E3CI_diff, fitted = results9099$E3CI_real),
+               mse(results_df9099$E3CI_diff, fitted = results9099$IID), 
+               mse(results_df9099$E3CI_diff, fitted = results9099$rw1), 
+               mse(results_df9099$E3CI_diff, fitted = results9099$Interaction_I),
+               mse(results_df9099$E3CI_diff, fitted = results9099$Interaction_II),
+               mse(results_df9099$E3CI_diff, fitted = results9099$Interaction_III),
+               mse(results_df9099$E3CI_diff, fitted = results9099$Interaction_IV))
+#MSE_90_99
+```
+
+
+- `cpo` can be computed in the following way:
+```{r}
+cpo <- function(inla_model){
+  return(-sum(log(inla_model$cpo$cpo)))
+}
+
+cpo_iid_time <- cpo(mod90_99)
+cpo_rw1 <- cpo(mod90_99_2)
+cpo_interactionI <- cpo(mod90_99_I)
+cpo_interactionII <- cpo(mod90_99_II)
+cpo_interactionIII <- cpo(mod90_99_III)
+cpo_interactionIV <- cpo(mod90_99_IV)
+
+
+CPOs_9099 <- c(cpo_iid_time,cpo_rw1,cpo_interactionI,cpo_interactionII,
+               cpo_interactionIII,cpo_interactionIV)
+```
+
+- `marginal likelihood`: **Hay dos valores, no se cual es el que pone la teoria**
+```{r}
+MLIKs9099 <- c(mod90_99$mlik[[1,1]],mod90_99_2$mlik[[1,1]],
+               mod90_99_I$mlik[[1,1]],
+               mod90_99_II$mlik[[1,1]],
+               mod90_99_III$mlik[[1,1]],
+               mod90_99_IV$mlik[[1,1]])
+```
+
+- `DIC`
+```{r}
+DICs9099 <- c(mod90_99$dic$dic,mod90_99_2$dic$dic,
+              mod90_99_I$dic$dic,
+              mod90_99_II$dic$dic,
+              mod90_99_III$dic$dic,
+              mod90_99_IV$dic$dic)
+```
+
+- `WAIC` 
+```{r}
+WAICs9099 <- c(mod90_99$waic$waic,mod90_99_2$waic$waic,
+               mod90_99_I$waic$waic,
+               mod90_99_II$waic$waic,
+               mod90_99_III$waic$waic,
+               mod90_99_IV$waic$waic)
+```
+
+
+```{r}
+percentage_diff_sign <- function(vector1, vector2) {
+  # Check that the vectors have the same length
+  if (length(vector1) != length(vector2)) {
+    stop("The vectors must have the same length.")
+  }
+  
+  # Calculate the number of elements with differing signs
+  diff_signs <- sum(sign(vector1) != sign(vector2))
+  
+  # Calculate the percentage
+  percentage <- (diff_signs / length(vector1)) * 100
+  
+  return(percentage)
+}
+signs90_99 <- c(percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fitted),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fitted2),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fittedI),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fittedII),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fittedIII),
+                percentage_diff_sign(results_df9099$E3CI_diff,results_df9099$fittedIV))
+```
+
+```{r}
+errors_df9099_t <- data.frame("Likelihood" = rep("t",6),
+                              "Model" = c("bym + IID", "bym + rw1", "Interaction I",
+                                        "Interaction II","Interaction III","Interaction IV"), 
+               "WAIC" = WAICs9099,
+               "MLIK" = MLIKs9099,
+               "CPO" = CPOs_9099,
+               "DIC" = DICs9099,
+               "MSE" = MSE_90_99[2:length(MSE_90_99)],
+               "SignError" = signs90_99)
+
+library(kableExtra)
+kable(errors_df9099_t)
+#xtable::xtable(errors_df9099_t, digits = 3)
+```
+
+##### Gaussian vs t-student
+
+```{r}
+errors_df9099 <- rbind(errors_df9099_n,errors_df9099_t)
+kable(errors_df9099)
+```
+
+
+#### Predictions
+
+First, we save the current `data90_99` which contains the fitted values of the above models
+```{r}
+data90_99_saved <- data90_99
+```
+
+To predict with INLA we only have to include the observations we want to predict **with a missing value in the response**. 
+
+Then, let us reconsider `data_9099` but now we are going to include the year 2000:
+```{r}
+years9099 <- c(1990:2022)
+data90_99 <- NULL
+for(i in years9099){
+  data90_99 <- rbind(data90_99,select_year_diff2(year = i))
+}
+data90_99_bench <- data90_99
+data90_99[which(data90_99$Year %in% c(2005:2022)),"E3CI_diff"] = NA
+```
+
+Now, we refit the best model obtained above: *bym + interaction*.
+
+```{r}
+# Create indexes as before
+#data90_99$idarea <- as.numeric(as.factor(data90_99$color_code))
+data90_99$idarea1 <- data90_99$idarea
+#data90_99$idtime <- 1 + data90_99$Year - min(data90_99$Year)
+data90_99$idtime1 <- data90_99$idtime
+data90_99$idareatime <- interaction(data90_99$idarea,data90_99$idtime)
+data90_99$idtime_int <- data90_99$idtime
+data90_99$idarea_int <- data90_99$idarea
+
+formula_9090_I <- E3CI_diff ~ 1 + GDP_diff + CO2_diff + FA_diff + 
+  f(idarea, model = "bym", graph = g) + 
+  f(idtime, model = "rw1") + f(idtime1, model = "iid") +
+  f(idareatime, model = "iid")
+
+# Fit the model
+mod90_99_predI <- inla(formula = formula_9090_I, 
+                 family = "t",
+                 data = data90_99,
+                 control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+                 control.predictor = list(compute = TRUE))
+```
+
+Now, Inla has used the predictive distribution to compute the values for the year 2000:
+
+```{r}
+rows2000 <- which(data90_99$Year == 2000)
+rows2000_bench <- which(data90_99_bench$Year == 2000)
+pred_2000 <- mod90_99_predI$summary.fitted.values[rows2000,"mean"]
+
+#preds_mod9099 <- data.frame("Real_2000" = data90_99_bench[rows2000_bench,"E3CI"])
+data90_99_bench$fittedI <- mod90_99_predI$summary.fitted.values[,"mean"]
+data90_99_bench <- data90_99_bench %>%  relocate(fittedI, .after = E3CI)
+```
+
+**INLA does what he say?** 
+```{r}
+rows95_1 <- which(data90_99_saved$Year == 1995)
+rows95_2 <- which(data90_99_bench$Year == 1995)
+unique(rows95_2 == rows95_1) # True
+
+# Same fit?
+unique(data90_99_saved$fittedI[rows95_1] == data90_99_bench$fittedI[rows95_2])
+
+```
+
+
+
+Then, we can check the MSE error of the predicted values:
+
+```{r}
+# To check whether the order is correct or not 
+unique(rows2000_bench == rows2000)
+unique(data90_99$color_code[rows2000] == data90_99_bench$color_code[rows2000_bench])
+
+
+df_pred90_99 <- data.frame("Real" = data90_99_bench$E3CI_diff[rows2000_bench],
+                      "fittedI" = data90_99_bench$fittedI[rows2000_bench],
+                      "Code1" = data90_99_bench$color_code[rows2000_bench],
+                      "Code2" = data90_99$color_code[rows2000_bench])
+
+#View(df_pred90_99)
+
+MSE_pred2000 <- mse(real = data90_99_bench$E3CI_diff[rows2000_bench],
+                    fitted = data90_99_bench$fittedI[rows2000_bench]) %>% print()
+```
+
+It could be also of interest to check the number of missclassified signs:
+```{r}
+percentage_diff_sign <- function(vector1, vector2) {
+  # Check that the vectors have the same length
+  if (length(vector1) != length(vector2)) {
+    stop("The vectors must have the same length.")
+  }
+  
+  # Calculate the number of elements with differing signs
+  diff_signs <- sum(sign(vector1) != sign(vector2))
+  
+  # Calculate the percentage
+  percentage <- (diff_signs / length(vector1)) * 100
+  
+  return(percentage)
+}
+```
+
+
+```{r}
+map2000_real <- ggplot(data = data90_99_bench[rows2000_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2000") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2000_predI <- ggplot(data = data90_99_bench[rows2000_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2000") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2000_real
+map2000_predI
+Mse_pred2000 <- mse(data90_99_bench$E3CI_diff[rows2000_bench],data90_99_bench$fittedI[rows2000_bench])
+
+signerror2000<- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2000_bench],data90_99_bench$fittedI[rows2000_bench])
+```
+
+```{r}
+rows2001_bench <- which(data90_99_bench$Year == 2001)
+map2001_real <- ggplot(data = data90_99_bench[rows2001_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2001") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2001_predI <- ggplot(data = data90_99_bench[rows2001_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2001") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2001_real
+map2001_predI
+Mse_pred2001 <- mse(data90_99_bench$E3CI_diff[rows2001_bench],data90_99_bench$fittedI[rows2001_bench]) %>% print()
+
+signerror2001 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2001_bench],data90_99_bench$fittedI[rows2001_bench]) %>% print()
+```
+
+
+```{r}
+rows2002_bench <- which(data90_99_bench$Year == 2002)
+map2002_real <- ggplot(data = data90_99_bench[rows2002_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2002") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2002_predI <- ggplot(data = data90_99_bench[rows2002_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2002") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2002_real
+map2002_predI
+
+Mse_pred2002 <- mse(data90_99_bench$E3CI_diff[rows2002_bench],data90_99_bench$fittedI[rows2002_bench])
+
+signerror2002 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2002_bench],data90_99_bench$fittedI[rows2002_bench]) %>% print()
+```
+
+```{r}
+rows2003_bench <- which(data90_99_bench$Year == 2003)
+map2003_real <- ggplot(data = data90_99_bench[rows2003_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2003") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2003_predI <- ggplot(data = data90_99_bench[rows2003_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2003") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2003_real
+map2003_predI
+Mse_pred2003 <- mse(data90_99_bench$E3CI_diff[rows2003_bench],data90_99_bench$fittedI[rows2003_bench]) %>% print()
+signerror2003 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2003_bench],data90_99_bench$fittedI[rows2003_bench]) %>% print()
+```
+
+```{r}
+rows2004_bench <- which(data90_99_bench$Year == 2004)
+map2004_real <- ggplot(data = data90_99_bench[rows2004_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2004") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2004_predI <- ggplot(data = data90_99_bench[rows2004_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2004") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2004_real
+map2004_predI
+
+Mse_pred2004 <- mse(data90_99_bench$E3CI_diff[rows2004_bench],data90_99_bench$fittedI[rows2004_bench]) %>% print()
+
+signerror2004 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2004_bench],data90_99_bench$fittedI[rows2004_bench]) %>% print()
+```
+
+
+```{r}
+rows2005_bench <- which(data90_99_bench$Year == 2005)
+map2005_real <- ggplot(data = data90_99_bench[rows2005_bench,]) +
+  geom_sf(aes(fill = E3CI_diff)) + 
+  labs(fill = "Real ERA5 - 2005") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2005_predI <- ggplot(data = data90_99_bench[rows2005_bench,]) +
+  geom_sf(aes(fill = fittedI)) + 
+  labs(fill = "Bym+Interaction ERA5 - 2005") +
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red")
+
+map2005_real
+map2005_predI
+Mse_pred2005 <- mse(data90_99_bench$E3CI_diff[rows2005_bench],data90_99_bench$fittedI[rows2005_bench]) %>% print()
+
+signerror2005 <- percentage_diff_sign(data90_99_bench$E3CI_diff[rows2005_bench],data90_99_bench$fittedI[rows2005_bench]) %>% print()
+```
+
+All joint:
+
+```{r}
+filtered_data <- data90_99_bench %>%
+  filter(Year %in% c(2001, 2002, 2003, 2004, 2005))
+
+combined_df <- filtered_data %>%
+  select(geometry, Year, E3CI_diff, fittedI) %>%
+  pivot_longer(cols = c(E3CI_diff, fittedI), 
+               names_to = "Variable", 
+               values_to = "Value") %>%
+  unite("Year_Variable", Year, Variable, sep = "_")
+
+combined_map <- ggplot(combined_df) +
+  geom_sf(aes(fill = Value)) + 
+  scale_fill_gradient2(
+    midpoint = 0, low = "blue", mid = "white", high = "red") +
+  facet_wrap(~ Year_Variable, ncol = 5) +
+  labs(fill = "Value") +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 12),
+        legend.position = "right") 
+
+print(combined_map)
+```
+
+In a table
+```{r}
+preds_df9099 <- data.frame(Year = 2000:2005,
+                           SignError = c(signerror2000,signerror2001,
+                                          signerror2002,signerror2003,
+                                          signerror2004,signerror2005),
+                           MSE = c(Mse_pred2000,Mse_pred2001,
+                                    Mse_pred2002,Mse_pred2003,
+                                    Mse_pred2004,Mse_pred2005))
+
+# transformed_df <- data.frame(
+#   Metric = c("SignError","SignError","MSE","MSE"),
+#   Model = c("Spatial", "Spatio-Temp","Spatial", "Spatio-Temp"),
+#   `2000` = c(signerror2000_00, signerror2000, MSE_2000_00, Mse_pred2000),
+#   `2001` = c(signerror2001_00, signerror2001, MSE_2001_00, Mse_pred2001),
+#   `2002` = c(signerror2002_00, signerror2002, MSE_2002_00, Mse_pred2002),
+#   `2003` = c(signerror2003_00, signerror2003, MSE_2003_00, Mse_pred2003),
+#   `2004` = c(signerror2004_00, signerror2004, MSE_2004_00, Mse_pred2004),
+#   `2005` = c(signerror2005_00, signerror2005, MSE_2005_00, Mse_pred2005)
+# )
+
+transformed_df <- data.frame(
+  Metric = c("SignError","SignError","MSE","MSE"),
+  Model = c("Spatial", "Spatio-Temp","Spatial", "Spatio-Temp"),
+  `2000` = c(NA, signerror2000, NA, Mse_pred2000),
+  `2001` = c(NA, signerror2001, NA, Mse_pred2001),
+  `2002` = c(NA, signerror2002, NA, Mse_pred2002),
+  `2003` = c(NA, signerror2003, NA, Mse_pred2003),
+  `2004` = c(NA, signerror2004, NA, Mse_pred2004),
+  `2005` = c(NA, signerror2005, NA, Mse_pred2005)
+)
+
+kable(transformed_df)
+xtable(transformed_df, digits = 3)
+```
+
+##### All the sign errors
+```{r}
+compute_summary <- function(years){
+  sign_errors <- NULL
+  mses <- NULL
+  for(i in years){
+    cond <- which(data90_99_bench$Year == i)
+    sign_errors <- c(sign_errors,
+                     percentage_diff_sign(data90_99_bench$E3CI_diff[cond],
+                                          data90_99_bench$fittedI[cond]))
+    mses <- c(mses, 
+              mse(data90_99_bench$E3CI_diff[cond],
+                  data90_99_bench$fittedI[cond]))
+  }
+  df <- data.frame(Year = years,
+                   SignError = sign_errors,
+                   MSE = mses)
+  return(df)
+}
+```
+
+```{r}
+del82_05_22 <- compute_summary(years9099)
+kable(compute_summary(years9099))
+xtable(del82_05_22, digits = 7)
+
+```
+
+
+
+##### Posterior Information
+
+```{r}
+summary(mod90_99_I)
+mod90_99_I$summary.fixed[,1:6]
+mod90_99_I$summary.hyperpar
+
+xtable(mod90_99_I$summary.fixed[,1:6], digits = 4)
+xtable(mod90_99_I$summary.hyperpar)
+```
+
+#### Model Hypothesis
+Let us check some standard model hypotheses
+
+##### Gaussian Likelihood
+
+```{r}
+qqnorm(data90_99$E3CI_diff)
+qqline(data90_99$E3CI_diff,col="red")
+shapiro.test(data90_99$E3CI_diff)
+```
+
+
+##### Residuals Normality
+
+```{r}
+resid_9099 <- data90_99_saved$fittedI - data90_99_saved$E3CI_diff
+
+qqnorm(resid_9099)
+qqline(resid_9099,col="red")
+shapiro.test(resid_9099)
+```
+We observe that, there normality is not specially fulfilled in the lower tails, but the p-value is greater than a 0.05 significance level, so that we can not discard normality.
+
+##### Homocedasticity
+
+```{r}
+results_df9099$residuals <- resid_9099
+#Plot standardized residuals vs fitted values
+homoscedasticity_plot <- ggplot(results_df9099, aes(x = fittedI, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "blue") +
+  labs(title = "Standardized Residuals vs Fitted Values",
+       x = "Fitted Values",
+       y = "Standardized Residuals") +
+  theme_minimal() +
+  theme(panel.grid = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+print(homoscedasticity_plot)
+```
+
+
+
+##### Linearity
+
+```{r}
+results_df9099$residuals<- resid_9099
+results_df9099 <- results_df9099 %>%
+  mutate(standardized_residuals = residuals / sd(residuals))
+
+plot1 <- ggplot(results_df9099, aes(x = GDP_diff, y = standardized_residuals)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Residuals vs GDP_diff", x = "GDP_diff", y = "Residuals") +
+  theme_minimal()
+
+plot2 <- ggplot(results_df9099, aes(x = CO2_diff, y = standardized_residuals)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Residuals vs CO2_diff", x = "CO2_diff", y = "Residuals") +
+  theme_minimal()
+
+plot3 <- ggplot(results_df9099, aes(x = FA_diff, y = standardized_residuals)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Residuals vs FA_diff", x = "FA_diff", y = "Residuals") +
+  theme_minimal()
+
+# Combine the plots into a single plot
+# combined_plot <- plot_grid(plot1, plot2, plot3, ncol = 2)
+combined_plot <- plot_grid(plot1, plot2, plot3, homoscedasticity_plot, ncol = 2)
+
+# Display the combined plot
+print(combined_plot)
+```
+
+The linearity is not fulfilled at all. But there is no a clear patterns to think that the values can not be randomly distributed around the line.
+
+
+##### Independence
+
+```{r}
+library(lmtest)
+
+# Durbin-Watson
+dw_test <- dwtest(resid_9099 ~ mod90_99_I$summary.fitted.values[,"mean"])
+print(dw_test)
+```
+
+
+##### Outliers/Gaussian Likelihood
+The models that INLA fits assume a lot of structure LGM+GMRF. However, this model specification allows for different likelihoods. We have specified `family = gaussian` in each model. This allows us to check whether the observed response values are likely to follow a normal distribution. We proceed with a *shapiro test*. The null hypothesis is then that the sample is normally distributed.
+
+```{r}
+test2000 <- shapiro.test(data90_99$E3CI_diff)
+test2000$p.value
+```
+
+The p-value of `r test2000$p.value` says that there is no enough evidence to reject that our sample comes from a Normal population.
+
+```{r}
+qqnorm(data90_99$E3CI_diff)
+qqline(data90_99$E3CI_diff, col = "red")
+```
+
+
+
+
+
+
+
+
+
